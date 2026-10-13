@@ -9,13 +9,23 @@ import {
   useLogTimeTicketsTicketIdWorklogsPost,
   useUpdateWorklogWorklogsWorklogIdPatch,
 } from '@/api/generated/endpoints/worklogs/worklogs'
-import type { WorklogRead } from '@/api/generated/models'
+import {
+  getTicketTimeEstimateTicketsTicketIdTimeEstimateGetQueryKey,
+  useTicketTimeEstimateTicketsTicketIdTimeEstimateGet,
+} from '@/api/generated/endpoints/time-estimates/time-estimates'
+import type { TicketTimeEstimate, WorklogRead } from '@/api/generated/models'
 import { errorDetail } from '@/api/errors'
 import { useAuth } from '@/auth/useAuth'
 import { localToday } from '@/tickets/dueDate'
 import { formatTimerClock } from '@/tickets/timer/clock'
 import { useTimer } from '../timer/useTimer'
 import { formatDuration, parseDuration } from '@/tickets/duration'
+import {
+  RemainingField,
+  TicketEstimateBar,
+  TicketEstimateSummary,
+} from '@/tickets/detail/TimeEstimate'
+import { hasEstimate, parseRemaining } from '@/tickets/timeEstimate'
 import { i18n, Trans, userText, useTranslation } from '@/i18n'
 import { formatDate } from '@/i18n/format'
 import { Avatar } from '@/ui/Avatar'
@@ -32,10 +42,13 @@ export function TimeSection({
   ticketId,
   ticketIdentifier,
   readOnly,
+  estimateVersion = '',
 }: {
   ticketId: number
   ticketIdentifier: string
   readOnly: boolean
+  /** Changes when the ticket's estimate, remaining or status does (#268). */
+  estimateVersion?: string
 }) {
   const { user } = useAuth()
   const { t } = useTranslation(['tickets', 'common'])
@@ -46,15 +59,23 @@ export function TimeSection({
   const [editing, setEditing] = useState<number | null>(null)
   const [showAll, setShowAll] = useState(false)
   const remove = useDeleteWorklogWorklogsWorklogIdDelete()
+  // Logged against estimated (#268), with the sub-tickets added.
+  const estimateKey = getTicketTimeEstimateTicketsTicketIdTimeEstimateGetQueryKey(ticketId)
+  const estimate = useTicketTimeEstimateTicketsTicketIdTimeEstimateGet(ticketId, {
+    query: { queryKey: [...estimateKey, estimateVersion] },
+  }).data
+  const estimated = (estimate?.total.estimated_minutes ?? 0) > 0
 
   const time = query.data
-  const refresh = () =>
+  const refresh = () => {
     queryClient.invalidateQueries({
       queryKey: getTicketTimeTicketsTicketIdWorklogsGetQueryKey(ticketId),
     })
+    queryClient.invalidateQueries({ queryKey: estimateKey })
+  }
 
-  // Nothing logged and nothing to log with: no section at all.
-  if (!time || (readOnly && time.total_minutes === 0)) return null
+  // Nothing logged, nothing estimated and nothing to log with: no section.
+  if (!time || (readOnly && time.total_minutes === 0 && !estimated)) return null
 
   const entries = showAll ? time.entries : time.entries.slice(0, RECENT)
 
@@ -63,10 +84,14 @@ export function TimeSection({
       <div className="mb-2 flex items-center justify-between">
         <span className="flex items-center gap-2">
           <span className="eyebrow">{t('time.title')}</span>
-          {time.total_minutes > 0 && (
-            <span className="identifier text-[11px] text-neutral-500">
-              {t('time.logged', { duration: formatDuration(time.total_minutes) })}
-            </span>
+          {estimate && estimated ? (
+            <TicketEstimateSummary estimate={estimate} />
+          ) : (
+            time.total_minutes > 0 && (
+              <span className="identifier text-[11px] text-neutral-500">
+                {t('time.logged', { duration: formatDuration(time.total_minutes) })}
+              </span>
+            )
           )}
         </span>
         {!readOnly && !logging && (
@@ -75,6 +100,8 @@ export function TimeSection({
           </button>
         )}
       </div>
+
+      {estimate && estimated && <TicketEstimateBar estimate={estimate} />}
 
       {!readOnly && (
         <div className={`mb-2 flex items-center flex-wrap justify-between gap-2 rounded-control px-2 py-1.5 ${timer.timer?.ticket_id === ticketId && !timer.timer.is_paused ? 'bg-brand-100' : 'bg-neutral-500/5'}`}>
@@ -162,6 +189,7 @@ export function TimeSection({
             refresh()
           }}
           ticketId={ticketId}
+          estimate={hasEstimate(estimate) ? estimate : undefined}
         />
       )}
 
@@ -275,12 +303,15 @@ function dayLabel(day: string): string {
 function WorklogForm({
   ticketId,
   entry,
+  estimate,
   submitLabel,
   onCancel,
   onSaved,
 }: {
   ticketId: number
   entry?: WorklogRead
+  /** A new entry on a ticket with something to work out what is left from. */
+  estimate?: TicketTimeEstimate
   submitLabel: string
   onCancel: () => void
   onSaved: () => void
@@ -291,9 +322,12 @@ function WorklogForm({
   const [duration, setDuration] = useState(entry ? formatDuration(entry.minutes) : '')
   const [day, setDay] = useState(entry?.worked_on ?? localToday())
   const [note, setNote] = useState(entry?.note ?? '')
+  // What is left, as typed; null while it follows the worked-out answer.
+  const [left, setLeft] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const minutes = parseDuration(duration)
+  const leftMinutes = left === null || left.trim() === '' ? undefined : parseRemaining(left)
   const invalid = duration.trim() !== '' && minutes === null
 
   const submit = async (event: FormEvent) => {
@@ -302,6 +336,7 @@ function WorklogForm({
       setError(t('time.form.invalid'))
       return
     }
+    if (leftMinutes === null) return
     setError(null)
     try {
       if (entry) {
@@ -312,7 +347,14 @@ function WorklogForm({
       } else {
         await create.mutateAsync({
           ticketId,
-          data: { minutes, worked_on: day, note: note || undefined },
+          data: {
+            minutes,
+            worked_on: day,
+            note: note || undefined,
+            // Only when somebody changed it: untouched, the server works out
+            // the same answer the field shows.
+            ...(leftMinutes !== undefined && { remaining_minutes: leftMinutes }),
+          },
         })
       }
       onSaved()
@@ -358,6 +400,14 @@ function WorklogForm({
           />
         </label>
       </div>
+      {estimate && (
+        <RemainingField
+          estimate={estimate}
+          spent={minutes ?? 0}
+          value={left}
+          onChange={setLeft}
+        />
+      )}
       {(error || invalid) && (
         <p role="alert" className="text-xs text-danger-600">
           {error ?? t('time.form.invalid')}

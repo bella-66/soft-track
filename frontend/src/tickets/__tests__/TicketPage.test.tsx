@@ -26,6 +26,7 @@ function ticket(number: number, fields: Partial<TicketRead> = {}): TicketRead {
     identifier: `ENG-${number}`,
     title: `Ticket ${number}`,
     status: { id: 1, team_id: 5, name: 'Todo', category: 'unstarted', position: 0, color: '#888' },
+    creator: { id: 2, username: 'priya', full_name: 'Priya' },
     ...fields,
   } as unknown as TicketRead
 }
@@ -244,5 +245,19 @@ describe('the ticket page', () => {
       screen.getByText('That team does not exist, or you are not a member of it.'),
     ).toBeTruthy()
     expect(screen.getByRole('link', { name: /Go to your teams/ }).getAttribute('href')).toBe('/')
+  })
+})
+
+describe('a ticket on an archived team (#322)', () => {
+  it('still opens by its key, and offers nothing that changes it', () => {
+    const OPS: TeamRead = { id: 6, name: 'Operations', key: 'OPS', created_at: '2026-01-01T00:00:00Z' }
+    const archived = { ...ENG, archived_at: '2026-09-30T10:00:00Z', archived: true }
+    mocks.lookup = { team: archived, teams: [archived, OPS], isLoading: false }
+    renderPage('/ENG/ticket/7')
+
+    expect(screen.getByText('Body for ticket 70')).toBeTruthy()
+    // Watching is yours; moving it, or anything else, is not on offer.
+    expect(screen.getByRole('button', { name: 'Watch' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull()
   })
 })

@@ -1,11 +1,14 @@
 import { Navigate } from 'react-router-dom'
 
+import { activeTeams } from '@/team/archived'
 import { NoTeamHome } from '@/team/NoTeamHome'
 import { useMyTeams } from '@/team/useTeams'
 import { Loading } from '@/ui/Loading'
 
 /**
- * Landing route for authenticated users: their first team's board.
+ * Landing route for authenticated users: My work (#258), everything that is
+ * theirs across every team they are on. The board of the team last open is
+ * one click away in its sidebar.
  *
  * With no team it is a page of its own (#318): what there is to reach without
  * one, the teams there are and who runs them, invitations when there are any,
@@ -25,8 +28,10 @@ export default function TeamsHome() {
     )
   }
 
-  if (teams && teams.length > 0) {
-    return <Navigate to={`/${teams[0].key}`} replace />
+  // A team in use, that is: an archived one (#322) is not where anybody
+  // lands, and somebody on nothing else is on no team in use.
+  if (teams && activeTeams(teams).length > 0) {
+    return <Navigate to="/my-work" replace />
   }
 
   return <NoTeamHome />

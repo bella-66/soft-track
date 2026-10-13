@@ -1,7 +1,7 @@
 """add timer
 
 Revision ID: b2e5a8f15fc9
-Revises: c5ed33d77db4
+Revises: c2a1b3d45e67
 Create Date: 2026-10-07 18:27:11.857572
 
 """
@@ -14,7 +14,7 @@ import sqlmodel  # autogenerate emits sqlmodel.sql.sqltypes.AutoString()
 
 # revision identifiers, used by Alembic.
 revision: str = "b2e5a8f15fc9"
-down_revision: Union[str, Sequence[str], None] = "c5ed33d77db4"
+down_revision: Union[str, Sequence[str], None] = "c2a1b3d45e67"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

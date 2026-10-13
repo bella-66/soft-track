@@ -2,13 +2,17 @@
 
 from typing import Mapping, Optional
 
-from sqlmodel import Session, case, func, select
+from sqlalchemy import delete, update
+from sqlmodel import Session, case, col, func, select
 
 from lib_identity.models.identity import UserPublic
 from lib_softtrack import outside
 from lib_softtrack.models.teams import (
     EpicRef,
+    MyJoinRequest,
+    TeamArchivePreview,
     TeamCreate,
+    TeamDirectory,
     TeamDirectoryEntry,
     TeamMemberAdd,
     TeamMemberRead,
@@ -18,23 +22,42 @@ from lib_softtrack.models.teams import (
 from lib_softtrack.tables import (
     Attachment,
     AutomationRule,
+    AutomationRun,
     Comment,
     CustomField,
+    CustomFieldValue,
+    CodeLink,
+    GuestEpic,
     Label,
+    Notification,
+    ScheduleRun,
     Sprint,
+    SprintCapacity,
+    SprintAction,
     Ticket,
+    TicketEvent,
+    TicketLabelLink,
+    TicketSchedule,
     TicketTemplate,
     OutboundWebhook,
+    UserDefaultView,
+    WebhookDelivery,
     Worklog,
     Project,
     Repository,
+    RetiredTeamKey,
     SavedView,
     ShareLink,
+    StatusCategory,
     Team,
+    TeamInvite,
+    TeamJoinRequest,
     TeamMember,
+    TeamRequest,
     TeamRole,
     User,
     WorkflowStatus,
+    utcnow,
 )
 from lib_softtrack.trash import INCLUDE_TRASHED
 from lib_utils.errors import ErrorCode, api_error
@@ -136,24 +159,71 @@ def require_team_admin(team_id: int, user: User, session: Session) -> TeamMember
     return membership
 
 
-def require_team_writer(team_id: int, user: User, session: Session) -> TeamMember:
-    """The guard for anything that changes what a team contains (#104).
+def require_team_not_archived(team_id: int, session: Session) -> Team:
+    """Refuse a change to an archived team (#322), whoever is asking.
 
-    Admins and members pass; guests do not. Most routes get this from
-    `app_softtrack.guards.team_writer`, which works out the team from the URL
-    before the request body is even parsed. A service calls it directly only
-    when a request reaches a *second* team named in its body -- linking to a
-    ticket elsewhere, or moving a ticket to another team -- because the URL
-    only says which team the request starts from.
+    An archived team is read-only for everybody on it, admins included; what
+    it still takes is being unarchived, or deleted when it is empty, and
+    those go through `update_team` and `delete_team`. `require_team_writer`
+    and `require_team_commenter` both call this, so a guard built on either
+    cannot leave it out.
     """
-    membership = require_team_member(team_id, user, session)
+    team = get_team_or_404(team_id, session)
+    if team.archived_at is not None:
+        raise api_error(
+            status_code=403,
+            code=ErrorCode.team_read_only,
+            detail=f"{team.name} is archived, so it is read-only until it is "
+            "unarchived",
+        )
+    return team
+
+
+def _refuse_guests(membership: TeamMember) -> None:
     if membership.role == TeamRole.guest:
         raise api_error(
             status_code=403,
             code=ErrorCode.team_read_only,
             detail="Guests can view this team but not change it",
         )
+
+
+def require_team_writer(team_id: int, user: User, session: Session) -> TeamMember:
+    """The guard for anything that changes what a team contains (#104).
+
+    Admins and members pass; guests do not, and nobody does on an archived
+    team (#322), which is read-only until it is unarchived.
+
+    Most routes get this from `app_softtrack.guards.team_writer`, which works
+    out the team from the URL before the request body is even parsed. A
+    service calls it directly only when a request reaches a *second* team
+    named in its body -- linking to a ticket elsewhere, or moving a ticket to
+    another team -- because the URL only says which team the request starts
+    from. That second team being archived refuses the request too.
+    """
+    membership = require_team_member(team_id, user, session)
+    require_team_not_archived(team_id, session)
+    _refuse_guests(membership)
     return membership
+
+
+def require_team_keeper(team_id: int, user: User, session: Session) -> None:
+    """The guard for the team itself: its settings, archiving it and deleting
+    it (#322).
+
+    `require_team_writer` without the archived check, because an archived
+    team still takes being unarchived, and being deleted when it is empty;
+    the services decide which of those a request is, from its validated
+    body, and refuse everything else on an archived team. A site admin
+    passes whether or not they are on the team: they archive, unarchive and
+    delete any team from Administration -> Teams (#307), and the team's own
+    settings answer them the same way. What else needs a team admin is the
+    service's to check.
+    """
+    get_team_or_404(team_id, session)
+    if user.is_site_admin:
+        return
+    _refuse_guests(require_team_member(team_id, user, session))
 
 
 def require_team_commenter(team_id: int, user: User, session: Session) -> TeamMember:
@@ -162,11 +232,12 @@ def require_team_commenter(team_id: int, user: User, session: Session) -> TeamMe
     Admins and members pass, like `require_team_writer`. A guest passes too on
     a team that lets its guests comment: they may write, react, attach files
     to their comments and edit or delete their own, and still change nothing
-    else. The services decide what "their own" covers.
+    else. The services decide what "their own" covers. Nobody comments on an
+    archived team (#322).
     """
     membership = require_team_member(team_id, user, session)
+    team = require_team_not_archived(team_id, session)
     if membership.role == TeamRole.guest:
-        team = session.get(Team, team_id)
         if not team.guests_may_comment:
             raise api_error(
                 status_code=403,
@@ -204,6 +275,12 @@ _TEAM_OWNED_BY_PATH = (
         "Template not found",
     ),
     ("field_id", CustomField, ErrorCode.custom_field_not_found, "Field not found"),
+    (
+        "schedule_id",
+        TicketSchedule,
+        ErrorCode.schedule_not_found,
+        "Schedule not found",
+    ),
     (
         "share_link_id",
         ShareLink,
@@ -291,15 +368,39 @@ def _active_admin_count(session: Session, team_id: int) -> int:
     ).one()
 
 
-def create_team(session: Session, current_user: User, payload: TeamCreate) -> Team:
-    key = payload.key.upper()
-    existing = session.exec(select(Team).where(Team.key == key)).first()
-    if existing:
+def require_key_free(session: Session, key: str) -> None:
+    """Refuse a key a team holds, or ever gave identifiers under (#322).
+
+    Keys are never given back: an archived team keeps its own, and a deleted
+    one that had tickets leaves it retired (`RetiredTeamKey`). Each answers
+    with its own code, so the form can say which it is.
+    """
+    team = session.exec(select(Team).where(Team.key == key)).first()
+    if team is not None and team.archived_at is not None:
+        raise api_error(
+            status_code=400,
+            code=ErrorCode.team_key_archived,
+            detail=f"{key} belongs to an archived team, and a key is never "
+            "given back.",
+        )
+    if team is not None:
         raise api_error(
             status_code=400,
             code=ErrorCode.team_key_taken,
             detail="Team key already in use",
         )
+    if session.get(RetiredTeamKey, key) is not None:
+        raise api_error(
+            status_code=400,
+            code=ErrorCode.team_key_retired,
+            detail=f"{key} belonged to a deleted team whose tickets used it, "
+            "and a key is never given back.",
+        )
+
+
+def create_team(session: Session, current_user: User, payload: TeamCreate) -> Team:
+    key = payload.key.upper()
+    require_key_free(session, key)
 
     team = Team(name=payload.name, key=key, description=payload.description)
     session.add(team)
@@ -324,6 +425,10 @@ def create_team(session: Session, current_user: User, payload: TeamCreate) -> Te
 
 
 def list_teams_for_user(session: Session, current_user: User) -> list[Team]:
+    """Every team the user is on, archived ones too (#322), each saying
+    whether it is. An archived team is out of the team switcher and the
+    pickers, which leave it out themselves, but its board, its tickets and
+    `ENG-42` still open, and finding it by its key is what lets them."""
     statement = (
         select(Team)
         .join(TeamMember, TeamMember.team_id == Team.id)
@@ -332,16 +437,42 @@ def list_teams_for_user(session: Session, current_user: User) -> list[Team]:
     return session.exec(statement).all()
 
 
-def team_directory(session: Session) -> list[TeamDirectoryEntry]:
-    """Every team on the instance, with how many are on it and who runs it.
+def team_directory(session: Session, user: User) -> TeamDirectory:
+    """The teams there are, with how many are on each and who runs it.
 
-    For somebody on no team (#318), who needs to know whom to ask to be added.
-    The same kind of thing the people directory already shows anybody signed
-    in: names and people, not work. Three queries however many teams there
-    are. Deactivated accounts are left out of both the count and the admins,
-    since neither can add anybody.
+    First for somebody on no team (#318), who needs to know whom to ask; then
+    for anybody finding a team and asking to join it (#259). The same kind
+    of thing the people directory already shows anybody signed in: names and
+    people, not work. Deactivated accounts are left out of both the count and
+    the admins, since neither can add anybody.
+
+    A team that keeps itself off the list is left out, unless you are on it
+    or have asked to join it, and counted instead. An archived team (#307) is
+    neither shown nor counted: there is nothing to join.
     """
-    teams = session.exec(select(Team).order_by(func.lower(Team.name))).all()
+    from lib_softtrack.joining import prune_expired
+
+    prune_expired(session)
+    mine = dict(
+        session.exec(
+            select(TeamMember.team_id, TeamMember.role).where(
+                TeamMember.user_id == user.id
+            )
+        ).all()
+    )
+    asked = {
+        request.team_id: request
+        for request in session.exec(
+            select(TeamJoinRequest).where(TeamJoinRequest.requester_id == user.id)
+        ).all()
+    }
+    teams = session.exec(
+        select(Team)
+        .where(Team.archived_at == None)  # noqa: E711 -- SQL comparison
+        .order_by(func.lower(Team.name))
+    ).all()
+    shown = [t for t in teams if t.listed or t.id in mine or t.id in asked]
+
     counts = dict(
         session.exec(
             select(TeamMember.team_id, func.count())
@@ -351,7 +482,7 @@ def team_directory(session: Session) -> list[TeamDirectoryEntry]:
         ).all()
     )
     admins: dict[int, list[UserPublic]] = {}
-    for team_id, user in session.exec(
+    for team_id, admin in session.exec(
         select(TeamMember.team_id, User)
         .join(User, User.id == TeamMember.user_id)
         .where(
@@ -360,18 +491,28 @@ def team_directory(session: Session) -> list[TeamDirectoryEntry]:
         )
         .order_by(TeamMember.joined_at)
     ).all():
-        admins.setdefault(team_id, []).append(UserPublic.model_validate(user))
-    return [
-        TeamDirectoryEntry(
-            id=team.id,
-            name=team.name,
-            key=team.key,
-            description=team.description,
-            member_count=counts.get(team.id, 0),
-            admins=admins.get(team.id, []),
-        )
-        for team in teams
-    ]
+        admins.setdefault(team_id, []).append(UserPublic.model_validate(admin))
+    return TeamDirectory(
+        teams=[
+            TeamDirectoryEntry(
+                id=team.id,
+                name=team.name,
+                key=team.key,
+                description=team.description,
+                member_count=counts.get(team.id, 0),
+                admins=admins.get(team.id, []),
+                open_to_join=team.open_to_join,
+                my_role=mine.get(team.id),
+                my_request=(
+                    MyJoinRequest.model_validate(asked[team.id])
+                    if team.id in asked and team.id not in mine
+                    else None
+                ),
+            )
+            for team in shown
+        ],
+        unlisted_count=len(teams) - len(shown),
+    )
 
 
 def get_team(session: Session, current_user: User, team_id: int) -> Team:
@@ -380,11 +521,192 @@ def get_team(session: Session, current_user: User, team_id: int) -> Team:
     return team
 
 
+def delete_empty_team(session: Session, team: Team) -> None:
+    """Delete a team with no tickets, the trash included: the one made to try
+    the product, or by mistake. A team with work in it is archived instead.
+
+    The one deletion routine behind both doors: a team admin's
+    `DELETE /teams/{id}` (#322) and a site admin's `DELETE /admin/teams/{id}`
+    (#307). Each route keeps its own guard; the rule for "empty" and what goes
+    with the team live here.
+
+    Everything that belongs to it goes with it, children first so that no
+    foreign key is left pointing at a removed row: its webhooks and their
+    deliveries, rules and their runs, schedules and their runs, repositories
+    and their code links, views, default views and share links, epics and
+    their outside guests, sprints with their actions and capacities, history
+    rows still filed under it (a ticket moved away keeps its old ones), fields
+    with their values and the notifications that name them, labels and their
+    links to tickets, statuses, templates, invitations, join requests and memberships
+    (notification mutes live on the membership). A request for a team that
+    approving created keeps its row, as the record of who asked; it just no
+    longer names a team.
+    """
+    team_id = team.id
+    tickets = session.exec(
+        select(func.count())
+        .select_from(Ticket)
+        .where(Ticket.team_id == team_id)
+        .execution_options(**INCLUDE_TRASHED)
+    ).one()
+    if tickets:
+        raise api_error(
+            status_code=409,
+            code=ErrorCode.team_not_empty,
+            detail=f"{team.name} has tickets, so it can be archived and not deleted",
+        )
+
+    def of_team(table):
+        return select(table.id).where(table.team_id == team_id).scalar_subquery()
+
+    team.default_view_id = None
+    session.add(team)
+    session.flush()
+    for statement in (
+        delete(WebhookDelivery).where(
+            col(WebhookDelivery.webhook_id).in_(of_team(OutboundWebhook))
+        ),
+        delete(OutboundWebhook).where(OutboundWebhook.team_id == team_id),
+        delete(AutomationRun).where(AutomationRun.team_id == team_id),
+        delete(AutomationRule).where(AutomationRule.team_id == team_id),
+        delete(ScheduleRun).where(
+            col(ScheduleRun.schedule_id).in_(of_team(TicketSchedule))
+        ),
+        delete(TicketSchedule).where(TicketSchedule.team_id == team_id),
+        delete(CodeLink).where(col(CodeLink.repository_id).in_(of_team(Repository))),
+        delete(Repository).where(Repository.team_id == team_id),
+        delete(ShareLink).where(ShareLink.team_id == team_id),
+        delete(UserDefaultView).where(UserDefaultView.team_id == team_id),
+        delete(SavedView).where(SavedView.team_id == team_id),
+        delete(GuestEpic).where(col(GuestEpic.project_id).in_(of_team(Project))),
+        delete(SprintAction).where(col(SprintAction.sprint_id).in_(of_team(Sprint))),
+        delete(SprintCapacity).where(
+            col(SprintCapacity.sprint_id).in_(of_team(Sprint))
+        ),
+        delete(TicketEvent).where(TicketEvent.team_id == team_id),
+        delete(Notification).where(
+            col(Notification.custom_field_id).in_(of_team(CustomField))
+        ),
+        delete(CustomFieldValue).where(
+            col(CustomFieldValue.field_id).in_(of_team(CustomField))
+        ),
+        delete(CustomField).where(CustomField.team_id == team_id),
+        delete(Sprint).where(Sprint.team_id == team_id),
+        delete(Project).where(Project.team_id == team_id),
+        delete(TicketLabelLink).where(
+            col(TicketLabelLink.label_id).in_(of_team(Label))
+        ),
+        delete(Label).where(Label.team_id == team_id),
+        delete(WorkflowStatus).where(WorkflowStatus.team_id == team_id),
+        delete(TicketTemplate).where(TicketTemplate.team_id == team_id),
+        delete(TeamInvite).where(TeamInvite.team_id == team_id),
+        delete(TeamJoinRequest).where(TeamJoinRequest.team_id == team_id),
+        delete(TeamMember).where(TeamMember.team_id == team_id),
+        update(TeamRequest).where(TeamRequest.team_id == team_id).values(team_id=None),
+    ):
+        session.exec(statement)
+    # Identifiers it gave out are still in commit messages and chat logs,
+    # even with no ticket left to answer to them: its key stays taken.
+    if team.next_ticket_number > 1:
+        session.add(RetiredTeamKey(key=team.key))
+    session.delete(team)
+    session.commit()
+
+
+def _require_admin_or_site_admin(team_id: int, user: User, session: Session) -> None:
+    if not user.is_site_admin:
+        require_team_admin(team_id, user, session)
+
+
+def delete_team(session: Session, current_user: User, team_id: int) -> None:
+    """A team admin deletes their own team, or a site admin any team, if it is
+    empty (#322) -- archived or not, the same as Administration -> Teams."""
+    team = get_team_or_404(team_id, session)
+    _require_admin_or_site_admin(team_id, current_user, session)
+    delete_empty_team(session, team)
+
+
+def _count(session: Session, statement) -> int:
+    return session.exec(statement).one()
+
+
+def archive_preview(
+    session: Session, current_user: User, team_id: int
+) -> TeamArchivePreview:
+    """What archiving the team stops and what it leaves, for the dialog that
+    asks first (#322); and how many tickets keep it from being deleted."""
+    get_team_or_404(team_id, session)
+    _require_admin_or_site_admin(team_id, current_user, session)
+
+    def counted(table, *where):
+        return _count(
+            session,
+            select(func.count()).select_from(table).where(*where),
+        )
+
+    return TeamArchivePreview(
+        members=counted(TeamMember, TeamMember.team_id == team_id),
+        automation_rules=counted(
+            AutomationRule,
+            AutomationRule.team_id == team_id,
+            AutomationRule.is_enabled == True,  # noqa: E712 -- SQL comparison
+        ),
+        webhooks=counted(
+            OutboundWebhook,
+            OutboundWebhook.team_id == team_id,
+            OutboundWebhook.is_enabled == True,  # noqa: E712 -- SQL comparison
+        ),
+        repository_links=counted(Repository, Repository.team_id == team_id),
+        recurring_tickets=counted(
+            TicketSchedule,
+            TicketSchedule.team_id == team_id,
+            TicketSchedule.paused_at == None,  # noqa: E711 -- SQL IS NULL
+        ),
+        open_tickets=_count(
+            session,
+            select(func.count())
+            .select_from(Ticket)
+            .join(WorkflowStatus, WorkflowStatus.id == Ticket.status_id)
+            .where(
+                Ticket.team_id == team_id,
+                col(WorkflowStatus.category).not_in(
+                    [StatusCategory.done, StatusCategory.cancelled]
+                ),
+            ),
+        ),
+        tickets=_count(
+            session,
+            select(func.count())
+            .select_from(Ticket)
+            .where(Ticket.team_id == team_id)
+            .execution_options(**INCLUDE_TRASHED),
+        ),
+    )
+
+
 def update_team(
     session: Session, current_user: User, team_id: int, payload: TeamUpdate
 ) -> Team:
+    """Change what a team is called and how it works, and archive or unarchive
+    it (#322).
+
+    Archiving and unarchiving are for its admins and for site admins, who do
+    the same from Administration -> Teams (#307); everything else is for its
+    admins. An archived team takes nothing but being unarchived -- asking for
+    anything else with it is refused, so that unarchiving puts it back
+    exactly as it was -- and asking to archive it again changes nothing,
+    keeping the date it was archived.
+    """
     team = get_team_or_404(team_id, session)
-    require_team_admin(team_id, current_user, session)
+    changes = payload.model_dump(exclude_unset=True)
+    archiving_only = set(changes) == {"archived"}
+
+    if archiving_only:
+        _require_admin_or_site_admin(team_id, current_user, session)
+    else:
+        if team.archived_at is not None:
+            require_team_not_archived(team_id, session)
+        require_team_admin(team_id, current_user, session)
 
     if payload.name is not None:
         name = payload.name.strip()
@@ -405,6 +727,22 @@ def update_team(
         team.wip_limits_hard = payload.wip_limits_hard
     if payload.wip_counts_subtickets is not None:
         team.wip_counts_subtickets = payload.wip_counts_subtickets
+    if payload.estimate_unit is not None:
+        team.estimate_unit = payload.estimate_unit
+    if payload.capacity_points is not None:
+        team.capacity_points = payload.capacity_points
+    if payload.capacity_minutes_per_day is not None:
+        team.capacity_minutes_per_day = payload.capacity_minutes_per_day
+    if payload.listed is not None:
+        team.listed = payload.listed
+    if payload.open_to_join is not None:
+        team.open_to_join = payload.open_to_join
+    # One flag for both doors (#307, #322): the date it was archived. Asking
+    # for what it is already keeps that date.
+    if payload.archived is not None and payload.archived != (
+        team.archived_at is not None
+    ):
+        team.archived_at = utcnow() if payload.archived else None
 
     session.add(team)
     session.commit()
@@ -424,7 +762,12 @@ def list_team_members(
 ) -> list[TeamMemberRead]:
     get_team_or_404(team_id, session)
     require_team_member(team_id, current_user, session)
+    return list_members_of(session, team_id)
 
+
+def list_members_of(session: Session, team_id: int) -> list[TeamMemberRead]:
+    """A team's roster, unguarded: the caller has decided who may read it --
+    a member, or a site admin choosing the team's next admin (#307)."""
     # One join rather than a session.get per row: a roster is read on every
     # board load, and the per-row version made it N+1 queries deep.
     rows = session.exec(
@@ -512,6 +855,10 @@ def add_team_member(
     session.add(membership)
     if user.is_external:
         outside.set_epics(session, team_id, user.id, epic_ids)
+    # Added by hand: a request of theirs to join has nothing left to ask (#259).
+    from lib_softtrack.joining import forget
+
+    forget(session, team_id, user.id)
     session.commit()
     session.refresh(membership)
 
@@ -595,7 +942,8 @@ def remove_team_member(
     member_user_id: int,
     reassign_to: Optional[int] = None,
 ) -> None:
-    """Remove someone from a team, or leave it yourself.
+    """Remove someone from a team, or leave it yourself -- not on an archived
+    team (#322).
 
     One function for both because they are the same row and the same guards --
     only who is allowed to ask differs.
@@ -612,6 +960,10 @@ def remove_team_member(
         require_team_member(team_id, current_user, session)
     else:
         require_team_admin(team_id, current_user, session)
+    # Nobody leaves or is removed from an archived team (#322) either: their
+    # open tickets would be handed on, and unarchiving would not put it back
+    # as it was.
+    require_team_not_archived(team_id, session)
 
     membership = _membership_or_404(session, team_id, member_user_id)
 

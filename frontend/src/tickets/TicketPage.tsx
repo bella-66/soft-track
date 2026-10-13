@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import {
   useGetTicketByNumberTeamsTeamIdTicketsByNumberNumberGet,
@@ -20,6 +20,7 @@ import { TicketHeaderActions } from '@/tickets/TicketHeaderActions'
 import { TicketStack } from '@/tickets/TicketStack'
 import { TicketSurfaceContext, ticketPath } from '@/tickets/surface'
 import { useTeamEvents } from '@/realtime/useTeamEvents'
+import { isArchived } from '@/team/archived'
 import { canWriteIn } from '@/team/members'
 import { TeamProvider } from '@/team/TeamContext'
 import { useTeamData } from '@/team/useTeamData'
@@ -76,7 +77,7 @@ export function TicketPage() {
       <Deleted
         team={team}
         number={number}
-        canRestore={canWriteIn(teamData.members, user?.id)}
+        canRestore={!isArchived(team) && canWriteIn(teamData.members, user?.id)}
         onRestored={() => found.refetch()}
       />
     )
@@ -112,6 +113,7 @@ export function TicketPage() {
 
 function TicketPageView({ found, team }: { found: TicketRead; team: TeamRead }) {
   const { t } = useTranslation(['tickets', 'common'])
+  const navigate = useNavigate()
   // By id from here on: the body reads this same query, and every write it
   // makes refreshes it, so the header keeps up. Seeded with what the lookup
   // by number already returned, so nothing waits on a second request.
@@ -185,7 +187,7 @@ function TicketPageView({ found, team }: { found: TicketRead; team: TeamRead }) 
         </nav>
         <span className="flex shrink-0 items-center gap-1">
           <CopyLinkButton ticket={ticket} />
-          <TicketHeaderActions ticket={ticket} />
+          <TicketHeaderActions ticket={ticket} onDeleted={() => navigate(`/${team.key}`, { replace: true })} />
         </span>
       </header>
 

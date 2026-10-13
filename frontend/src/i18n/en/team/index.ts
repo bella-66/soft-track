@@ -5,6 +5,9 @@ import { home } from '@/i18n/en/team/home'
 import { projects } from '@/i18n/en/team/projects'
 import { labels } from '@/i18n/en/team/labels'
 import { outside } from '@/i18n/en/team/outside'
+import { askForTeam } from '@/i18n/en/team/askForTeam'
+import { directory } from '@/i18n/en/team/directory'
+import { archived } from '@/i18n/en/team/archived'
 
 export const team = {
   invites,
@@ -13,4 +16,7 @@ export const team = {
   projects,
   labels,
   outside,
+  askForTeam,
+  directory,
+  archived,
 } as const

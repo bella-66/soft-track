@@ -2,12 +2,13 @@ import { useState } from 'react'
 import { Outlet, useNavigate } from 'react-router-dom'
 
 import { useAuth } from '@/auth/useAuth'
-import { toSearchParams } from '@/board/filters'
+import { searchString, toSearchParams } from '@/board/filters'
 import { withGrouping } from '@/board/grouping'
 import { Sidebar } from '@/board/Sidebar'
 import { DEFAULT_SORT, withSort } from '@/board/sorting'
 import { lastTeamKey } from '@/team/lastTeam'
 import { ShellFrame } from '@/team/ShellFrame'
+import { activeTeams, isArchived } from '@/team/archived'
 import { TeamProvider } from '@/team/TeamContext'
 import { useTeamData } from '@/team/useTeamData'
 import { useTeamByKey } from '@/team/useTeams'
@@ -20,7 +21,8 @@ export type PeopleOutlet = {
 }
 
 /**
- * The frame around the people pages (#125): the same sidebar as the board.
+ * The frame around the people pages (#125), and around My work (#258): the
+ * same sidebar as the board.
  *
  * The directory is nobody's team, but the sidebar is always some team's, so
  * it is the team whose board was open last -- opening People from OPS keeps
@@ -29,7 +31,9 @@ export type PeopleOutlet = {
 export default function PeopleLayout() {
   const [lastKey] = useState(lastTeamKey)
   const { team: remembered, teams, isLoading } = useTeamByKey(lastKey)
-  const team = remembered ?? teams[0]
+  // Not an archived team (#322): its sidebar is read-only, and its board is
+  // opened by its key rather than landed on.
+  const team = remembered && !isArchived(remembered) ? remembered : activeTeams(teams)[0]
   const teamData = useTeamData(team)
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -65,7 +69,7 @@ export default function PeopleLayout() {
           withGrouping(toSearchParams(filters), arrangement?.grouping ?? 'status'),
           arrangement?.sort ?? DEFAULT_SORT,
         )
-        navigate({ pathname: `/${team.key}`, search: search.toString() })
+        navigate({ pathname: `/${team.key}`, search: searchString(search) })
       }}
       isAdmin={isTeamAdmin}
     />

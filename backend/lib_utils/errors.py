@@ -39,6 +39,8 @@ class ErrorCode(str, enum.Enum):
     account_deactivated = "account_deactivated"
     #: Too many attempts; `Retry-After` says when to try again.
     rate_limited = "rate_limited"
+    #: /metrics while no METRICS_TOKEN is set (#100): the route does not exist.
+    metrics_disabled = "metrics_disabled"
 
     # --- what you may do -------------------------------------------------------
     not_team_member = "not_team_member"
@@ -56,6 +58,9 @@ class ErrorCode(str, enum.Enum):
     not_finance_admin = "not_finance_admin"
     #: Registration is invite-only on this instance.
     invite_only = "invite_only"
+    #: Creating a team, on an instance that leaves it to site admins or to
+    #: named people (#306). Asking for one is open to the rest.
+    team_creation_restricted = "team_creation_restricted"
 
     # --- something you named does not exist ------------------------------------
     team_not_found = "team_not_found"
@@ -75,12 +80,16 @@ class ErrorCode(str, enum.Enum):
     attachment_not_found = "attachment_not_found"
     comment_not_found = "comment_not_found"
     template_not_found = "template_not_found"
+    #: A recurring-ticket schedule (#264) that does not exist.
+    schedule_not_found = "schedule_not_found"
     #: A team's own field (#117) that does not exist -- by id in a path, or
     #: by key in a ticket's `custom_fields`.
     custom_field_not_found = "custom_field_not_found"
     worklog_not_found = "worklog_not_found"
     timer_not_found = "timer_not_found"
     notification_not_found = "notification_not_found"
+    #: A kind of notification nobody registered (#263).
+    notification_kind_not_found = "notification_kind_not_found"
     repository_not_found = "repository_not_found"
     invite_not_found = "invite_not_found"
     user_not_found = "user_not_found"
@@ -96,6 +105,11 @@ class ErrorCode(str, enum.Enum):
     receipt_not_found = "receipt_not_found"
     reimbursement_batch_not_found = "reimbursement_batch_not_found"
     budget_not_found = "budget_not_found"
+    #: A request for a team that does not exist (#306).
+    team_request_not_found = "team_request_not_found"
+    #: A request to join a team (#259) that does not exist, has run out, or
+    #: is somebody else's or another team's.
+    join_request_not_found = "join_request_not_found"
     #: The person is not a member of the team the request is about.
     member_not_found = "member_not_found"
     #: A status, label, project or sprint id that belongs to another team.
@@ -107,6 +121,12 @@ class ErrorCode(str, enum.Enum):
     email_taken = "email_taken"
     username_taken = "username_taken"
     team_key_taken = "team_key_taken"
+    #: A key an archived team holds (#322): `ENG-42` is in commit messages
+    #: and chat logs, so the key is never given back.
+    team_key_archived = "team_key_archived"
+    #: A key a deleted team had given tickets under (#322), kept for the same
+    #: reason. A team deleted before its first ticket gives its key back.
+    team_key_retired = "team_key_retired"
     status_name_taken = "status_name_taken"
     template_name_taken = "template_name_taken"
     #: Field keys and names are unique on a team, whatever the case (#117).
@@ -118,12 +138,24 @@ class ErrorCode(str, enum.Enum):
     #: So are a team's label names (#321).
     label_name_taken = "label_name_taken"
     already_member = "already_member"
+    #: Appointing an admin of a team who is one already (#307).
+    already_team_admin = "already_team_admin"
     link_exists = "link_exists"
     link_contradicts = "link_contradicts"
     repository_already_connected = "repository_already_connected"
     oauth_account_taken = "oauth_account_taken"
+    #: A new link to choose a password, for an account whose owner has
+    #: already chosen one (#303).
+    account_already_activated = "account_already_activated"
+    #: Setting a password for an account whose owner has not chosen one yet
+    #: (#303): they choose it, from their link.
+    account_not_activated = "account_not_activated"
 
     # --- a rule of the model says no ------------------------------------------
+    #: Being assigned and being mentioned cannot be turned off in the app (#263).
+    notification_always_on = "notification_always_on"
+    #: A channel this SoftTrack does not offer: email with no mail server (#263).
+    notification_channel_unavailable = "notification_channel_unavailable"
     #: The last admin of a team cannot leave, be removed or be demoted.
     last_team_admin = "last_team_admin"
     last_site_admin = "last_site_admin"
@@ -203,6 +235,9 @@ class ErrorCode(str, enum.Enum):
     share_target_required = "share_target_required"
     #: A date worked that has not happened yet.
     worklog_in_future = "worklog_in_future"
+    #: A timesheet's range that ends before it starts, or covers more than a
+    #: year (#267).
+    timesheet_range_invalid = "timesheet_range_invalid"
     #: Moving a ticket to the team it is already on (#98).
     transfer_same_team = "transfer_same_team"
     view_other_team = "view_other_team"
@@ -256,6 +291,19 @@ class ErrorCode(str, enum.Enum):
     #: A department that approved payroll (and, later, expenses and budgets)
     #: is attributed to is renamed, not deleted: the record keeps pointing at it.
     department_has_finance_history = "department_has_finance_history"
+    #: A request for a team is approved or declined once (#306).
+    team_request_decided = "team_request_decided"
+    #: Only a team with no tickets, in the trash or not, is deleted (#307);
+    #: one with work in it is archived.
+    team_not_empty = "team_not_empty"
+    #: Asking to join a team (#259) you have already asked to join: one open
+    #: request per person per team.
+    join_request_pending = "join_request_pending"
+    #: Joining a team without asking (#259) that has to be asked.
+    team_not_open = "team_not_open"
+    #: Who may create teams is set in the environment (TEAM_CREATION), which
+    #: wins over the app (#306).
+    team_creation_from_environment = "team_creation_from_environment"
 
     # --- what you sent is not usable ------------------------------------------
     name_required = "name_required"
@@ -289,6 +337,8 @@ class ErrorCode(str, enum.Enum):
     # --- links and sign-in flows -----------------------------------------------
     invite_invalid = "invite_invalid"
     api_token_not_found = "api_token_not_found"
+    #: Not one of your live sessions (#308): revoked, expired, or somebody else's.
+    session_not_found = "session_not_found"
     webhook_not_found = "webhook_not_found"
     #: Not an http(s) URL, or no events chosen.
     webhook_invalid = "webhook_invalid"
@@ -300,6 +350,10 @@ class ErrorCode(str, enum.Enum):
     invite_wrong_recipient = "invite_wrong_recipient"
     #: A password reset link that is wrong, used, expired or superseded.
     reset_link_invalid = "reset_link_invalid"
+    #: More addresses in one bulk invitation than this instance takes (#304),
+    #: or none at all.
+    too_many_addresses = "too_many_addresses"
+    no_addresses = "no_addresses"
     #: This instance has no SMTP server configured.
     email_not_configured = "email_not_configured"
     oauth_provider_unknown = "oauth_provider_unknown"
@@ -307,6 +361,20 @@ class ErrorCode(str, enum.Enum):
     oauth_expired = "oauth_expired"
     oauth_connect_failed = "oauth_connect_failed"
     oauth_not_connected = "oauth_not_connected"
+    #: The two-factor code (or recovery code) is wrong, or was already used.
+    totp_code_invalid = "totp_code_invalid"
+    #: The five minutes between the password and the code ran out, or the
+    #: account's sessions were revoked in between. Start signing in again.
+    totp_session_expired = "totp_session_expired"
+    #: Confirming a two-factor setup that was never started.
+    totp_not_enrolling = "totp_not_enrolling"
+    #: Setting up two-factor again while it is on. Turn it off first.
+    totp_already_enabled = "totp_already_enabled"
+    #: Turning off two-factor on an account that does not have it.
+    totp_not_enabled = "totp_not_enabled"
+    #: The stored secret cannot be read with this instance's key -- usually a
+    #: rotated SECRET_KEY. A site admin has to clear two-factor for the account.
+    totp_unavailable = "totp_unavailable"
 
 
 class ApiErrorBody(BaseModel):

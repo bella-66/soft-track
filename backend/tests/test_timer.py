@@ -1,12 +1,10 @@
 """A timer on a ticket (#266)."""
 
-import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlmodel import select
 
-from lib_softtrack.tables import Timer
+from lib_softtrack import worklogs as worklogs_service
 from tests.conftest import delete_for_good
 
 
@@ -70,6 +68,54 @@ def test_start_timer_on_ticket(client, team, ticket):
     assert get_res.json()["ticket_id"] == ticket["id"]
 
 
+def test_timer_persists_server_elapsed_time_and_stops_without_logging(
+    client, team, ticket, monkeypatch
+):
+    now = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(worklogs_service, "utcnow", lambda: now)
+    response = client.post(f"/tickets/{ticket['id']}/timer", headers=team["headers"])
+    assert response.status_code == 200, response.text
+    started = response.json()
+    assert started["duration_seconds"] == 0
+    assert set(started) == {
+        "ticket_id",
+        "ticket_identifier",
+        "ticket_team_key",
+        "ticket_number",
+        "started_at",
+        "duration_seconds",
+        "is_paused",
+        "paused_at",
+        "created_at",
+        "updated_at",
+        "replaced",
+    }
+    assert started["replaced"] is None
+    assert started["ticket_team_key"] == team["team"]["key"]
+    assert started["ticket_number"] == ticket["number"]
+    assert (
+        datetime.fromisoformat(started["created_at"]).replace(tzinfo=timezone.utc)
+        == now
+    )
+    assert (
+        datetime.fromisoformat(started["updated_at"]).replace(tzinfo=timezone.utc)
+        == now
+    )
+
+    now += timedelta(minutes=37)
+    current = client.get("/me/timer", headers=team["headers"]).json()
+    assert current["duration_seconds"] == 37 * 60
+    assert current["ticket_identifier"] == f"{team['team']['key']}-{ticket['number']}"
+
+    stopped = client.delete("/me/timer", headers=team["headers"])
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["duration_seconds"] == 37 * 60
+    assert client.get("/me/timer", headers=team["headers"]).json() is None
+    assert client.get(
+        f"/tickets/{ticket['id']}/worklogs", headers=team["headers"]
+    ).json()["entries"] == []
+
+
 def test_pause_and_resume_timer(client, team, ticket):
     client.post(f"/tickets/{ticket['id']}/timer", headers=team["headers"])
 
@@ -90,20 +136,6 @@ def test_pause_and_resume_timer(client, team, ticket):
     timer = resume_res.json()
     assert timer["is_paused"] is False
     assert timer["paused_at"] is None
-
-
-def test_patch_me_timer(client, team, ticket):
-    client.post(f"/tickets/{ticket['id']}/timer", headers=team["headers"])
-
-    # Patch pause
-    res = client.patch("/me/timer", json={"paused": True}, headers=team["headers"])
-    assert res.status_code == 200
-    assert res.json()["is_paused"] is True
-
-    # Patch resume
-    res = client.patch("/me/timer", json={"paused": False}, headers=team["headers"])
-    assert res.status_code == 200
-    assert res.json()["is_paused"] is False
 
 
 def test_starting_same_ticket_resumes_if_paused(client, team, ticket):
@@ -134,15 +166,6 @@ def test_one_timer_per_person_starting_second_replaces_first(
     # Only one timer exists
     get_res = client.get("/me/timer", headers=team["headers"])
     assert get_res.json()["ticket_id"] == other_ticket["id"]
-
-
-def test_discard_timer(client, team, ticket):
-    client.post(f"/tickets/{ticket['id']}/timer", headers=team["headers"])
-    del_res = client.delete("/me/timer", headers=team["headers"])
-    assert del_res.status_code == 204
-
-    get_res = client.get("/me/timer", headers=team["headers"])
-    assert get_res.json() is None
 
 
 def test_guests_cannot_start_timer(client, team, auth, ticket):
@@ -181,3 +204,55 @@ def test_multiple_users_have_independent_timers(
 
     assert timer_team["ticket_id"] == ticket["id"]
     assert timer_maya["ticket_id"] == other_ticket["id"]
+
+
+def test_timer_can_be_stopped_after_ticket_is_trashed(client, team, ticket):
+    client.post(f"/tickets/{ticket['id']}/timer", headers=team["headers"])
+    trashed = client.delete(f"/tickets/{ticket['id']}", headers=team["headers"])
+    assert trashed.status_code == 204, trashed.text
+
+    stopped = client.delete("/me/timer", headers=team["headers"])
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["ticket_id"] == ticket["id"]
+    assert client.get("/me/timer", headers=team["headers"]).json() is None
+
+
+def test_timer_can_be_paused_and_stopped_after_team_archived(client, team, ticket):
+    client.post(f"/tickets/{ticket['id']}/timer", headers=team["headers"])
+    archived = client.patch(
+        f"/teams/{team['team']['id']}",
+        json={"archived": True},
+        headers=team["headers"],
+    )
+    assert archived.status_code == 200, archived.text
+
+    paused = client.patch(
+        "/me/timer", json={"paused": True}, headers=team["headers"]
+    )
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["is_paused"] is True
+
+    stopped = client.delete("/me/timer", headers=team["headers"])
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["is_paused"] is True
+
+
+def test_timer_identifier_tracks_ticket_transfer(client, team, ticket):
+    started = client.post(f"/tickets/{ticket['id']}/timer", headers=team["headers"])
+    assert started.status_code == 200, started.text
+    ops = client.post(
+        "/teams", json={"name": "Ops", "key": "OPS"}, headers=team["headers"]
+    ).json()
+    transferred = client.post(
+        f"/tickets/{ticket['id']}/transfer",
+        json={"team_id": ops["id"]},
+        headers=team["headers"],
+    )
+    assert transferred.status_code == 200, transferred.text
+
+    moved_ticket = client.get(f"/tickets/{ticket['id']}", headers=team["headers"]).json()
+    current_timer = client.get("/me/timer", headers=team["headers"])
+    assert current_timer.status_code == 200, current_timer.text
+    assert current_timer.json()["ticket_identifier"] == moved_ticket["identifier"]
+    assert current_timer.json()["ticket_team_key"] == moved_ticket["team_key"]
+    assert current_timer.json()["ticket_number"] == moved_ticket["number"]

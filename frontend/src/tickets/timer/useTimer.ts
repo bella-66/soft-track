@@ -1,12 +1,13 @@
 import { createContext, useContext } from 'react'
 import type { TimerRead } from '@/api/generated/models'
+import type { LogReason } from './TimerProvider'
 
 export type TimerContextValue = {
   timer: TimerRead | null | undefined
   elapsedSeconds: number
   busy: boolean
   handleStartTimer: (ticketId: number, ticketIdentifier: string) => void
-  stopTimerAndOpenLog: () => Promise<void>
+  openWorklog: (reason: LogReason, startAfterLog?: number) => Promise<void>
   setPaused: (paused: boolean) => Promise<void>
 }
 
@@ -15,7 +16,7 @@ export const TimerContext = createContext<TimerContextValue>({
   elapsedSeconds: 0,
   busy: false,
   handleStartTimer: () => {},
-  stopTimerAndOpenLog: async () => {},
+  openWorklog: async () => {},
   setPaused: async () => {},
 })
 

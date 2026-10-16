@@ -10,7 +10,6 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-import sqlmodel  # autogenerate emits sqlmodel.sql.sqltypes.AutoString()
 
 # revision identifiers, used by Alembic.
 revision: str = "b2e5a8f15fc9"
@@ -25,12 +24,6 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("user_id", sa.Integer(), nullable=False),
         sa.Column("ticket_id", sa.Integer(), nullable=False),
-        sa.Column(
-            "ticket_team_key",
-            sqlmodel.sql.sqltypes.AutoString(),
-            nullable=False,
-        ),
-        sa.Column("ticket_number", sa.Integer(), nullable=False),
         sa.Column("started_at", sa.DateTime(), nullable=False),
         sa.Column("last_started_at", sa.DateTime(), nullable=False),
         sa.Column("accumulated_seconds", sa.Integer(), nullable=False),
@@ -43,10 +36,8 @@ def upgrade() -> None:
         sa.UniqueConstraint("user_id", name="uq_timer_user_id"),
     )
     op.create_index("ix_timer_ticket_id", "timer", ["ticket_id"], unique=False)
-    op.create_index("ix_timer_user_id", "timer", ["user_id"], unique=True)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_timer_user_id", table_name="timer")
     op.drop_index("ix_timer_ticket_id", table_name="timer")
     op.drop_table("timer")

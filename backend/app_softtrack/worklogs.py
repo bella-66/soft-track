@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Response
 from sqlmodel import Session
 
 from app_softtrack.guards import team_writer
-from lib_identity.identity import get_current_insider, get_current_user
+from lib_identity.identity import get_current_user
 from lib_softtrack import worklogs as worklogs_service
 from lib_softtrack.models.worklogs import (
     TicketTime,
@@ -17,13 +17,6 @@ from lib_softtrack.tables import User
 from web import get_session
 
 router = APIRouter(tags=["worklogs"])
-
-
-def _timer_access_guard(
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_insider),
-):
-    worklogs_service.require_timer_access_allowed(session, current_user)
 
 
 @router.get("/tickets/{ticket_id}/worklogs", response_model=TicketTime)
@@ -65,11 +58,7 @@ def start_timer(
     return worklogs_service.start_timer(session, current_user, ticket_id)
 
 
-@router.get(
-    "/me/timer",
-    response_model=TimerRead | None,
-    dependencies=[Depends(_timer_access_guard)],
-)
+@router.get("/me/timer", response_model=TimerRead | None)
 def my_timer(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -78,23 +67,16 @@ def my_timer(
     return worklogs_service.get_timer(session, current_user)
 
 
-@router.delete(
-    "/me/timer", status_code=204, dependencies=[Depends(_timer_access_guard)]
-)
+@router.delete("/me/timer", response_model=TimerRead)
 def stop_timer(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Stop the caller's timer and return its elapsed time for review."""
-    worklogs_service.stop_timer(session, current_user)
-    return Response(status_code=204)
+    """Stop the caller's timer and return it."""
+    return worklogs_service.stop_timer(session, current_user)
 
 
-@router.patch(
-    "/me/timer",
-    response_model=TimerRead,
-    dependencies=[Depends(_timer_access_guard)],
-)
+@router.patch("/me/timer", response_model=TimerRead)
 def update_timer(
     payload: TimerUpdate,
     session: Session = Depends(get_session),

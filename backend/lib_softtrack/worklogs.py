@@ -15,6 +15,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, delete, select
 
 from lib_identity.models.identity import UserPublic
@@ -33,8 +34,6 @@ from lib_softtrack.models.worklogs import (
 )
 from lib_softtrack.tables import (
     Team,
-    TeamMember,
-    TeamRole,
     Ticket,
     Timer,
     User,
@@ -42,6 +41,7 @@ from lib_softtrack.tables import (
     utcnow,
 )
 from lib_softtrack.teams import require_team_member, require_team_writer
+from lib_softtrack.trash import INCLUDE_TRASHED
 from lib_utils.errors import ErrorCode, api_error
 
 
@@ -189,7 +189,9 @@ def _elapsed_seconds(timer: Timer, now: datetime) -> int:
 
 
 def _timer_read(session: Session, timer: Timer, now: datetime) -> TimerRead:
-    ticket = session.get(Ticket, timer.ticket_id)
+    ticket = session.get(
+        Ticket, timer.ticket_id, execution_options=INCLUDE_TRASHED
+    )
     team = session.get(Team, ticket.team_id) if ticket else None
     if ticket is None or team is None:
         raise api_error(
@@ -199,9 +201,9 @@ def _timer_read(session: Session, timer: Timer, now: datetime) -> TimerRead:
         )
     return TimerRead(
         ticket_id=ticket.id,
-        ticket_identifier=f"{timer.ticket_team_key}-{timer.ticket_number}",
-        ticket_team_key=timer.ticket_team_key,
-        ticket_number=timer.ticket_number,
+        ticket_identifier=f"{team.key}-{ticket.number}",
+        ticket_team_key=team.key,
+        ticket_number=ticket.number,
         started_at=timer.started_at,
         duration_seconds=_elapsed_seconds(timer, now),
         is_paused=timer.paused_at is not None,
@@ -217,6 +219,21 @@ def get_timer(session: Session, current_user: User) -> Optional[TimerRead]:
 
 
 def start_timer(session: Session, current_user: User, ticket_id: int) -> TimerStartRead:
+    # Two concurrent starts for the same user can both see "no existing timer"
+    # and both insert. The loser hits the unique constraint on user_id, retrying
+    # once lets it see the winner's row and take one of the existing branches.
+    for attempt in range(2):
+        try:
+            return _start_timer_once(session, current_user, ticket_id)
+        except IntegrityError:
+            session.rollback()
+            if attempt == 1:
+                raise  # second failure is not the race we expect, surface it
+
+
+def _start_timer_once(
+    session: Session, current_user: User, ticket_id: int
+) -> TimerStartRead:
     ticket = get_ticket_or_404(session, ticket_id)
     require_team_writer(ticket.team_id, current_user, session)
     team = session.get(Team, ticket.team_id)
@@ -272,28 +289,15 @@ def _timer_for_user(session: Session, current_user: User) -> Timer:
             code=ErrorCode.timer_not_found,
             detail="No timer is running",
         )
-    ticket = get_ticket_or_404(session, timer.ticket_id)
-    require_team_writer(ticket.team_id, current_user, session)
     return timer
 
 
-def require_timer_access_allowed(session: Session, current_user: User) -> None:
-    """Guests have no timer to mutate and are refused."""
-    memberships = session.exec(
-        select(TeamMember).where(TeamMember.user_id == current_user.id)
-    ).all()
-    if memberships and all(member.role == TeamRole.guest for member in memberships):
-        raise api_error(
-            status_code=403,
-            code=ErrorCode.team_read_only,
-            detail="Guests can not use the timer",
-        )
-
-
-def stop_timer(session: Session, current_user: User) -> None:
+def stop_timer(session: Session, current_user: User) -> TimerRead:
     timer = _timer_for_user(session, current_user)
+    stopped = _timer_read(session, timer, utcnow())
     session.delete(timer)
     session.commit()
+    return stopped
 
 
 def update_timer(

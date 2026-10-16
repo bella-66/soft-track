@@ -9959,11 +9959,18 @@
           "worklogs"
         ],
         "summary": "Stop Timer",
-        "description": "Stop the caller's timer and return its elapsed time for review.",
+        "description": "Stop the caller's timer and return it.",
         "operationId": "stop_timer_me_timer_delete",
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimerRead"
+                }
+              }
+            }
           }
         },
         "security": [

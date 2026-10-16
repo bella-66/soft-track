@@ -1359,10 +1359,8 @@ class Timer(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("user_id", name="uq_timer_user_id"),)
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id", index=True, unique=True)
+    user_id: int = Field(foreign_key="user.id")
     ticket_id: int = Field(foreign_key="ticket.id", index=True)
-    ticket_team_key: str
-    ticket_number: int
     started_at: datetime
     last_started_at: datetime
     accumulated_seconds: int = Field(default=0)

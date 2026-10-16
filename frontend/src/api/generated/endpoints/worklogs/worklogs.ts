@@ -377,7 +377,7 @@ export function useMyTimerMeTimerGet<TData = Awaited<ReturnType<typeof myTimerMe
 
 
 /**
- * Stop the caller's timer and return its elapsed time for review.
+ * Stop the caller's timer and return it.
  * @summary Stop Timer
  */
 export const stopTimerMeTimerDelete = (
@@ -386,7 +386,7 @@ export const stopTimerMeTimerDelete = (
 ) => {
 
 
-      return apiClient<void>(
+      return apiClient<TimerRead>(
       {url: `/me/timer`, method: 'DELETE', signal
     },
       );

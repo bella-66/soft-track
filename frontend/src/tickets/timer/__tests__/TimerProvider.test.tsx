@@ -9,13 +9,20 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { TimerRead } from '@/api/generated/models'
+import type { TicketTimeEstimate, TimerRead } from '@/api/generated/models'
 import { localToday } from '@/tickets/dueDate'
 import { TimerProvider } from '@/tickets/timer/TimerProvider'
+import { TimerPill } from '@/tickets/timer/TimerPill'
 import { useTimer } from '@/tickets/timer/useTimer'
 
 const mocks = vi.hoisted(() => ({
-  query: { data: null as TimerRead | null, isSuccess: true, dataUpdatedAt: Date.now() },
+  query: {
+    data: null as TimerRead | null,
+    isSuccess: true,
+    dataUpdatedAt: Date.now(),
+    refetch: vi.fn(),
+  },
+  estimate: { data: undefined as TicketTimeEstimate | undefined },
   start: { mutateAsync: vi.fn(), isPending: false },
   stop: { mutateAsync: vi.fn(), isPending: false },
   update: { mutateAsync: vi.fn(), isPending: false },
@@ -35,6 +42,16 @@ vi.mock(
     useLogTimeTicketsTicketIdWorklogsPost: () => mocks.create,
   }),
 )
+
+vi.mock('@/api/generated/endpoints/time-estimates/time-estimates', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('@/api/generated/endpoints/time-estimates/time-estimates')
+  >)(),
+  getTicketTimeEstimateTicketsTicketIdTimeEstimateGetQueryKey: (ticketId: number) => [
+    `/tickets/${ticketId}/time-estimate`,
+  ],
+  useTicketTimeEstimateTicketsTicketIdTimeEstimateGet: () => mocks.estimate,
+}))
 
 function timer(overrides: Partial<TimerRead> = {}): TimerRead {
   return {
@@ -60,10 +77,10 @@ function StartButton() {
   )
 }
 
-function renderProvider(children = <StartButton />) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  })
+function renderProvider(
+  children = <StartButton />,
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
@@ -77,6 +94,12 @@ function renderProvider(children = <StartButton />) {
 beforeEach(() => {
   mocks.query.data = null
   mocks.query.dataUpdatedAt = Date.now()
+  mocks.query.refetch.mockReset().mockImplementation(async () => ({
+    data: mocks.query.data,
+    isError: false,
+    error: null,
+  }))
+  mocks.estimate.data = undefined
   for (const request of [mocks.start, mocks.stop, mocks.update, mocks.create]) {
     request.mutateAsync.mockReset().mockResolvedValue({})
   }
@@ -85,19 +108,21 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TimerProvider', () => {
-  it('shows the running timer as a movable floating pill', async () => {
+  it('renders the timer as an inline header pill', async () => {
     mocks.query.data = timer()
-    renderProvider(<div />)
+    renderProvider(<TimerPill />)
     const pill = screen.getByRole('link', { name: 'ENG-9' }).parentElement!
 
-    expect(pill.className).toContain('fixed')
-    expect(screen.getByRole('button', { name: 'Move timer' })).toBeTruthy()
+    expect(pill.className).not.toContain('fixed')
+    expect(pill.className).not.toContain('z-')
+    expect(screen.queryByRole('button', { name: 'Move timer' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
   })
 
   it('stops into an editable log form and saves an ordinary worklog', async () => {
     mocks.query.data = timer()
     mocks.stop.mutateAsync.mockResolvedValue(timer())
-    const user = renderProvider(<div />)
+    const user = renderProvider(<TimerPill />)
 
     expect(screen.getByRole('link', { name: 'ENG-9' }).getAttribute('href')).toBe(
       '/ENG/ticket/9',
@@ -212,8 +237,8 @@ describe('TimerProvider', () => {
       screen.getByText(/It was started .* at .* and never stopped/),
     ).toBeTruthy()
     expect(
-      screen.queryByPlaceholderText('Debugging the webhook retry'),
-    ).toBeNull()
+      screen.getByPlaceholderText('Debugging the webhook retry'),
+    ).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Log time' }))
     await waitFor(() => expect(mocks.stop.mutateAsync).toHaveBeenCalledTimes(1))
     await waitFor(() =>
@@ -222,7 +247,6 @@ describe('TimerProvider', () => {
         data: { minutes: 600, worked_on: '2026-10-02', note: undefined },
       }),
     )
-    expect(mocks.stop.mutateAsync).toHaveBeenCalledTimes(1)
     expect(mocks.create.mutateAsync.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.stop.mutateAsync.mock.invocationCallOrder[0],
     )
@@ -250,5 +274,19 @@ describe('TimerProvider', () => {
     mocks.query.data = timer({ duration_seconds: 10 * 60 * 60 })
     renderProvider(<div />)
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('leaves the timer running when the worklog is cancelled with Escape', async () => {
+    mocks.query.data = timer()
+    const user = renderProvider(<TimerPill />)
+
+    await user.click(screen.getByRole('button', { name: 'Stop' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Log time for ENG-9' })
+    await user.keyboard('{Escape}')
+
+    await waitFor(() => expect(dialog.isConnected).toBe(false))
+    expect(mocks.update.mutateAsync).not.toHaveBeenCalled()
+    expect(mocks.stop.mutateAsync).not.toHaveBeenCalled()
+    expect(mocks.create.mutateAsync).not.toHaveBeenCalled()
   })
 })

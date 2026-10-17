@@ -189,9 +189,7 @@ def _elapsed_seconds(timer: Timer, now: datetime) -> int:
 
 
 def _timer_read(session: Session, timer: Timer, now: datetime) -> TimerRead:
-    ticket = session.get(
-        Ticket, timer.ticket_id, execution_options=INCLUDE_TRASHED
-    )
+    ticket = session.get(Ticket, timer.ticket_id, execution_options=INCLUDE_TRASHED)
     team = session.get(Team, ticket.team_id) if ticket else None
     if ticket is None or team is None:
         raise api_error(

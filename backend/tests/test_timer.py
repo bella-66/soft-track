@@ -111,9 +111,12 @@ def test_timer_persists_server_elapsed_time_and_stops_without_logging(
     assert stopped.status_code == 200, stopped.text
     assert stopped.json()["duration_seconds"] == 37 * 60
     assert client.get("/me/timer", headers=team["headers"]).json() is None
-    assert client.get(
-        f"/tickets/{ticket['id']}/worklogs", headers=team["headers"]
-    ).json()["entries"] == []
+    assert (
+        client.get(f"/tickets/{ticket['id']}/worklogs", headers=team["headers"]).json()[
+            "entries"
+        ]
+        == []
+    )
 
 
 def test_pause_and_resume_timer(client, team, ticket):
@@ -226,9 +229,7 @@ def test_timer_can_be_paused_and_stopped_after_team_archived(client, team, ticke
     )
     assert archived.status_code == 200, archived.text
 
-    paused = client.patch(
-        "/me/timer", json={"paused": True}, headers=team["headers"]
-    )
+    paused = client.patch("/me/timer", json={"paused": True}, headers=team["headers"])
     assert paused.status_code == 200, paused.text
     assert paused.json()["is_paused"] is True
 
@@ -250,7 +251,9 @@ def test_timer_identifier_tracks_ticket_transfer(client, team, ticket):
     )
     assert transferred.status_code == 200, transferred.text
 
-    moved_ticket = client.get(f"/tickets/{ticket['id']}", headers=team["headers"]).json()
+    moved_ticket = client.get(
+        f"/tickets/{ticket['id']}", headers=team["headers"]
+    ).json()
     current_timer = client.get("/me/timer", headers=team["headers"])
     assert current_timer.status_code == 200, current_timer.text
     assert current_timer.json()["ticket_identifier"] == moved_ticket["identifier"]
